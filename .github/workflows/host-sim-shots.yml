@@ -22,7 +22,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
             libsdl2-dev libfreetype-dev libopusfile-dev libwavpack-dev libasound2-dev \
-            xvfb imagemagick ffmpeg sqlite3
+            xvfb imagemagick ffmpeg sqlite3 fonts-dejavu-core
 
       - name: Build the host simulator
         working-directory: sonix-player
@@ -40,7 +40,7 @@ jobs:
           # A sleeve with some colour in it, so the blurred backdrop and the
           # cover accent have something to work from.
           convert -size 640x640 gradient:'#1b2a41-#c9773a' \
-            -gravity center -pointsize 56 -fill white \
+            -font DejaVu-Sans -gravity center -pointsize 56 -fill white \
             -annotate 0 'Simulator Sessions' /tmp/cover.png
 
           # Three minutes, so the progress bar sits well away from both ends.
