@@ -560,6 +560,20 @@ static void refresh_play_icon(const device_state_t *state) {
 	// to report the second.
 	airplay_state_t ap;
 	airplay_get_state(&ap);
+
+	// Everything the glyph is drawn from, as one number. The player's poll asks
+	// for this twice a second, and writing the same source back is a repaint of
+	// the icon for nothing -- as is asking the Bluetooth route about a track
+	// that is not playing.
+	static unsigned shown_key = ~0u;
+	unsigned key = (ap.playing ? 1u : 0u) | (state->status == AUDIO_STATUS_PLAYING ? 2u : 0u) |
+				   (state->current_file[0] ? 4u : 0u) |
+				   (state->status == AUDIO_STATUS_PLAYING && bluetooth_audio_active() ? 8u : 0u);
+	if (key == shown_key) {
+		return;
+	}
+	shown_key = key;
+
 	if (ap.playing) {
 		lv_image_set_src(play_icon, &icon_airplay_status);
 		lv_obj_remove_local_style_prop(play_icon, LV_STYLE_IMAGE_RECOLOR, 0);

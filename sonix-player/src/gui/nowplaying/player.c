@@ -1,6 +1,7 @@
 #include "player.h"
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -260,13 +261,13 @@ static int cover_box_w, cover_box_h;   // the artwork spans the full screen widt
 // each would be a second place for that behaviour to be wrong.
 // ---------------------------------------------------------------------------
 
-// The progress bar: a thin track, and a knob that is a white ring around a
-// smaller circle of the accent colour. The ring is a wide white border over an
-// accent-coloured body rather than a second object, so it costs nothing and
-// follows the knob on its own.
-#define PROGRESS_TRACK_HEIGHT 10 // as thick as every other slider
-#define PROGRESS_KNOB_GROW 9	 // how far the knob grows past the track
-#define PROGRESS_KNOB_RING 5
+// The progress bar: a quiet groove and a small accent dot on it. The dot is the
+// accent-coloured body of the knob, given only a hairline outline by
+// theme_apply_slider_knob() -- no white ring, whose five pixels of bright paint
+// were the loudest thing under the sleeve, and no shadow, which cost a blend
+// over the whole knob on every frame the bar moved.
+#define PROGRESS_TRACK_HEIGHT 6 // a groove, not a bar: the fill is the reading
+#define PROGRESS_KNOB_GROW 5	// 6 + 2 * 5: a 16 px dot, proud of the track
 
 // How the shape of the track is drawn, and how much room it gets. The bars are
 // wide and well apart with rounded ends rather than a comb of hairlines: at
@@ -331,6 +332,7 @@ static bool cover_accent;
 
 static lv_obj_t *song_text_obj; // the title and artist, wherever they live now
 static lv_obj_t *song_side_obj; // the star and the format, likewise
+static lv_obj_t *song_info_obj; // the row holding both, for the track-change rise
 static void align_title_with_star(void);
 static lv_obj_t *alt_text_col;	// the two pills, stacked at the foot of the sleeve
 static lv_obj_t *alt_title_pill;
@@ -356,7 +358,41 @@ static int backdrop_studio_h;
 static bool backdrop_is_studio;
 
 static double current_total_length = 0; // cached from the last device_state snapshot, so slider math works between polls
-static char progress_label_text[32];
+
+// What the two clocks and the queue bearing last said, so the next poll can
+// compare against it without reading the text back out of the label. See
+// text_set().
+static char elapsed_text[32];
+static char remaining_text[32];
+static char queue_text[16];
+
+// Writes `text` into a label only when the label does not already say it.
+//
+// A label told the same words again is not free: lv_label_set_text() allocates,
+// copies, re-runs the bidi pass and the Arabic presentation-form shaping, then
+// invalidates the label and has the row laid out around it. The progress poll
+// runs twice a second, and only the elapsed clock of the three changes -- the
+// total and the queue position stand still for minutes. This is what skips the
+// other two.
+//
+// Kept in a buffer rather than compared against lv_label_get_text(): with
+// Arabic in the line the label holds the joined forms, not the words that were
+// set, so the same text would look new every time.
+static void text_set(lv_obj_t *label, char *store, size_t cap, const char *text) {
+	if (!label || !store || !cap || !text) {
+		return;
+	}
+	if (strcmp(store, text) == 0) {
+		return;
+	}
+	size_t len = strlen(text);
+	if (len >= cap) {
+		len = cap - 1;
+	}
+	memcpy(store, text, len);
+	store[len] = '\0';
+	lv_label_set_text(label, store);
+}
 
 // The stretch of the file the progress bar and its two clocks stand for. The
 // whole file, except on a book with chapters when Audiobooks -> Show duration
@@ -531,13 +567,13 @@ static void apply_audiobook_mode(bool book, bool podcast) {
 	audiobook_mode_valid = true;
 
 	if (prev_icon) {
-		lv_image_set_src(prev_icon, !skips                            ? &icon_skip_back
+		lv_image_set_src(prev_icon, !skips                            ? &icon_skip_back_large
 									: back == AUDIOBOOK_SKIP_HUGE ? &icon_prev_60
 									: back == AUDIOBOOK_SKIP_LONG ? &icon_prev_30
 																  : &icon_prev_10);
 	}
 	if (next_icon) {
-		lv_image_set_src(next_icon, !skips                               ? &icon_skip_forward
+		lv_image_set_src(next_icon, !skips                               ? &icon_skip_forward_large
 									: forward == AUDIOBOOK_SKIP_HUGE ? &icon_next_60
 									: forward == AUDIOBOOK_SKIP_LONG ? &icon_next_30
 																	 : &icon_next_10);
@@ -713,10 +749,25 @@ static void apply_playback_status(audio_status_t status) {
 	// not resume, it reconnects -- so the button says stop while it is on.
 	// Stopped, it goes back to play: the station stays loaded, and pressing
 	// it opens a fresh connection to the same one.
-	lv_image_set_src(play_btn_icon,
-					 live_mode ? (playing ? &icon_stop : &icon_play) : (playing ? &icon_pause : &icon_play));
-	lv_obj_set_style_image_recolor(play_btn_icon, chrome_accent(), 0);
-	lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
+	//
+	// The glyph is written only when one of the three things it depends on
+	// moved. This runs from the half-second poll as well as from the button,
+	// and an image source set again is a repaint of the play button even when
+	// nothing about it changed.
+	static audio_status_t glyph_status = (audio_status_t)-1;
+	static bool glyph_live;
+	static lv_color_t glyph_tint;
+	lv_color_t tint = chrome_accent();
+	if (status != glyph_status || live_mode != glyph_live || tint.red != glyph_tint.red ||
+		tint.green != glyph_tint.green || tint.blue != glyph_tint.blue) {
+		lv_image_set_src(play_btn_icon,
+						 live_mode ? (playing ? &icon_stop : &icon_play) : (playing ? &icon_pause : &icon_play));
+		lv_obj_set_style_image_recolor(play_btn_icon, tint, 0);
+		lv_obj_set_style_image_recolor_opa(play_btn_icon, LV_OPA_COVER, 0);
+		glyph_status = status;
+		glyph_live = live_mode;
+		glyph_tint = tint;
+	}
 
 	// Keep polling either way, just less often when nothing is playing. The
 	// timer must never be paused here: a track change is briefly reported as
@@ -801,14 +852,17 @@ static void update_queue_position(void) {
 		return;
 	}
 
+	char text[sizeof(queue_text)];
+
 	if (live_mode) {
 		int index;
 		int count;
 		if (live_custom_nav && radio_list_position(&index, &count)) {
-			lv_label_set_text_fmt(queue_position_label, "%d/%d", index + 1, count);
+			snprintf(text, sizeof(text), "%d/%d", index + 1, count);
 		} else {
-			lv_label_set_text(queue_position_label, "");
+			text[0] = '\0';
 		}
+		text_set(queue_position_label, queue_text, sizeof(queue_text), text);
 		return;
 	}
 
@@ -817,10 +871,11 @@ static void update_queue_position(void) {
 	bool worth_saying = count > 1 && index >= 0 && !audiobook_mode && !dlna_owns_playback();
 
 	if (!worth_saying) {
-		lv_label_set_text(queue_position_label, "");
-		return;
+		text[0] = '\0';
+	} else {
+		snprintf(text, sizeof(text), "%d/%d", (int)playlist_current_entry() + 1, count);
 	}
-	lv_label_set_text_fmt(queue_position_label, "%d/%d", (int)playlist_current_entry() + 1, count);
+	text_set(queue_position_label, queue_text, sizeof(queue_text), text);
 }
 
 // Works out view_start and view_length for playback at `position` in a file
@@ -881,11 +936,12 @@ static void set_progress_label(double current_secs, double total_secs) {
 		}
 	}
 
-	formatDoubleSeconds(shown, progress_label_text, sizeof(progress_label_text));
-	lv_label_set_text(elapsed_label, progress_label_text);
+	char text[32];
+	formatDoubleSeconds(shown, text, sizeof(text));
+	text_set(elapsed_label, elapsed_text, sizeof(elapsed_text), text);
 
-	formatDoubleSeconds(view_length, progress_label_text, sizeof(progress_label_text));
-	lv_label_set_text(remaining_label, progress_label_text);
+	formatDoubleSeconds(view_length, text, sizeof(text));
+	text_set(remaining_label, remaining_text, sizeof(remaining_text), text);
 
 	// Written from here because this is the one place that runs on every poll
 	// and on every track change, which is exactly when the answer can move.
@@ -1276,8 +1332,9 @@ static void slider_over_waveform(bool over) {
 		lv_obj_move_to_index(progress_slider, lv_obj_get_index(wave_box) + 1);
 	}
 	lv_obj_set_size(progress_slider, lv_pct(100), PROGRESS_TRACK_HEIGHT);
+	// Removing the local override is what puts the shared groove back; setting
+	// an opacity here would hide the style behind a snapshot of one colour.
 	lv_obj_remove_local_style_prop(progress_slider, LV_STYLE_BG_OPA, LV_PART_MAIN);
-	lv_obj_set_style_bg_opa(progress_slider, LV_OPA_30, LV_PART_MAIN);
 	lv_obj_remove_local_style_prop(progress_slider, LV_STYLE_BG_OPA, LV_PART_INDICATOR);
 	lv_obj_remove_local_style_prop(progress_slider, LV_STYLE_OPA, LV_PART_KNOB);
 }
@@ -3511,7 +3568,8 @@ static void player_refresh_theme(void) {
 	cover_set_backdrop_light(false);
 	lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_INDICATOR);
 	lv_obj_set_style_bg_color(progress_slider, chrome_accent(), LV_PART_KNOB);
-	set_over_cover(chrome_over_cover); // repaints the play disc for the new palette
+	theme_apply_slider_knob(progress_slider); // its hairline follows the palette too
+	set_over_cover(chrome_over_cover);		  // repaints the play disc for the new palette
 	update_repeat_button();
 	update_speed_button();
 
@@ -3524,6 +3582,34 @@ static void player_refresh_theme(void) {
 }
 
 static void update_qobuz_badge(void);
+
+// The new track's name rises a few pixels into place. It is the one piece of
+// motion on a track change, and it is deliberately small and cheap: the block
+// moved is one row of text, no picture is touched, and no opacity layer is
+// made. Nothing is drawn for a player that is closed or dark, nor in the two
+// arrangements that keep the names somewhere else.
+static void song_info_rise_cb(void *obj, int32_t value) {
+	lv_obj_set_style_translate_y((lv_obj_t *)obj, value, 0);
+}
+
+static void song_info_rise(void) {
+	if (!song_info_obj) {
+		return;
+	}
+	lv_anim_delete(song_info_obj, song_info_rise_cb);
+	if (!sheet_open || !power_screen_is_on() || layout_studio_now || layout_alt_now) {
+		lv_obj_set_style_translate_y(song_info_obj, 0, 0);
+		return;
+	}
+	lv_anim_t a;
+	lv_anim_init(&a);
+	lv_anim_set_var(&a, song_info_obj);
+	lv_anim_set_exec_cb(&a, song_info_rise_cb);
+	lv_anim_set_values(&a, 8, 0);
+	lv_anim_set_duration(&a, 190);
+	lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+	lv_anim_start(&a);
+}
 
 // Refreshes the now-playing info (title + artist) from the current
 // device state and resets the per-track length cache. Used both when the user
@@ -3572,6 +3658,7 @@ static void refresh_now_playing(void) {
 		// The artwork is the station's own icon, downloaded when it started.
 		// An empty path simply leaves the radio placeholder up.
 		refresh_cover(state.live_cover);
+		song_info_rise();
 		return;
 	}
 
@@ -3592,6 +3679,7 @@ static void refresh_now_playing(void) {
 	lyrics_request(&state);
 
 	refresh_cover(file);
+	song_info_rise();
 }
 
 // The parts of the now-playing display a live stream changes while it runs:
@@ -3875,6 +3963,26 @@ static void fav_btn_event_cb(lv_event_t *e) {
 	update_fav_button();
 }
 
+// The format line's own words, kept so the next rebuild can be compared
+// against them instead of writing the label again (see text_set).
+static char format_text[48];
+
+// Sets the format line only when it has something new to say. The line is
+// rebuilt from the decoder and the file on every now-playing refresh, and a
+// label written with the same words costs a reshape and a repaint for nothing.
+static void format_set(const char *fmt, ...) {
+	if (!format_label) {
+		return;
+	}
+	char text[sizeof(format_text)];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(text, sizeof(text), fmt, ap);
+	va_end(ap);
+
+	text_set(format_label, format_text, sizeof(format_text), text);
+}
+
 // The format line, the way the stock player writes it: "16/44.1 FLAC".
 static void update_format_label(const device_state_t *state) {
 	// The mark beside it in Studio, which is the same question asked of the
@@ -3882,11 +3990,16 @@ static void update_format_label(const device_state_t *state) {
 	// line is worked out, and the two say one thing between them.
 	if (layout_studio_now && studio_quality_icon) {
 		const lv_image_dsc_t *mark = studio_quality_mark(state);
-		if (mark) {
+		// Same mark as last time: the image source is not set again. This runs
+		// from the poll as well as on a track change, and setting a source is a
+		// repaint of the icon even when it is the same picture.
+		static const lv_image_dsc_t *shown_mark;
+		static bool shown_mark_valid;
+		if (!shown_mark_valid || mark != shown_mark) {
 			lv_image_set_src(studio_quality_icon, mark);
-			lv_obj_set_hidden(studio_quality_icon, false);
-		} else {
-			lv_obj_set_hidden(studio_quality_icon, true);
+			lv_obj_set_hidden(studio_quality_icon, mark == NULL);
+			shown_mark = mark;
+			shown_mark_valid = true;
 		}
 	}
 
@@ -3902,19 +4015,19 @@ static void update_format_label(const device_state_t *state) {
 		radio_now_t now;
 		radio_get_now(&now);
 		if (now.bits > 0 && now.sample_rate > 0 && now.codec[0]) {
-			lv_label_set_text_fmt(format_label, "%d/%g %s", now.bits, now.sample_rate / 1000.0, now.codec);
+			format_set("%d/%g %s", now.bits, now.sample_rate / 1000.0, now.codec);
 		} else if (now.bitrate > 0) {
-			lv_label_set_text_fmt(format_label, "%d kbps %s", now.bitrate, now.codec[0] ? now.codec : "MP3");
+			format_set("%d kbps %s", now.bitrate, now.codec[0] ? now.codec : "MP3");
 		} else if (now.codec[0]) {
-			lv_label_set_text(format_label, now.codec);
+			format_set("%s", now.codec);
 		} else {
-			lv_label_set_text(format_label, "");
+			format_set("%s", "");
 		}
 		return;
 	}
 
 	if (state->stream_sample_rate <= 0 || !state->current_file[0]) {
-		lv_label_set_text(format_label, "");
+		format_set("%s", "");
 		return;
 	}
 
@@ -3923,7 +4036,7 @@ static void update_format_label(const device_state_t *state) {
 	// the number takes the line under the title without saying anything worth
 	// knowing.
 	if (podcastcache_is_episode(state->current_file)) {
-		lv_label_set_text(format_label, "");
+		format_set("%s", "");
 		return;
 	}
 
@@ -3942,7 +4055,7 @@ static void update_format_label(const device_state_t *state) {
 	// nothing. How it gets there is not said: DoP is the only way it does.
 	int dsd = audio_get_dsd_multiple();
 	if (dsd > 0) {
-		lv_label_set_text_fmt(format_label, "DSD%d", dsd);
+		format_set("DSD%d", dsd);
 		return;
 	}
 
@@ -3968,24 +4081,42 @@ static void update_format_label(const device_state_t *state) {
 		// When the file does not declare one (a variable-bitrate MP3, a silent
 		// AAC) the real average stands in -- but only once the download has
 		// finished, for the reason just given.
-		struct stat st;
+		//
+		// A file on the card does not grow while it plays, so its size is asked
+		// for once per path and then kept. This function runs from the progress
+		// poll as well as on every track change, and a VBR file used to cost a
+		// stat() of the card twice a second to say the same number again.
+		static char sized_path[512];
+		static off_t sized_size;
 		if (kbps <= 0 && !qobuzcache_owns(state->current_file) && !tidalcache_owns(state->current_file) &&
-			state->progress_total_secs > 0.5 && stat(state->current_file, &st) == 0 && st.st_size > 0) {
-			kbps = (int)((double)st.st_size * 8.0 / state->progress_total_secs / 1000.0 + 0.5);
+			state->progress_total_secs > 0.5) {
+			if (strcmp(sized_path, state->current_file) != 0) {
+				struct stat st;
+				if (stat(state->current_file, &st) == 0 && st.st_size > 0) {
+					snprintf(sized_path, sizeof(sized_path), "%s", state->current_file);
+					sized_size = st.st_size;
+				} else {
+					sized_path[0] = '\0';
+					sized_size = 0;
+				}
+			}
+			if (sized_size > 0) {
+				kbps = (int)((double)sized_size * 8.0 / state->progress_total_secs / 1000.0 + 0.5);
+			}
 		}
 
 		if (kbps > 0) {
-			lv_label_set_text_fmt(format_label, "%d kbps %s", kbps, name);
+			format_set("%d kbps %s", kbps, name);
 			return;
 		}
 		// Neither one: the format name alone beats quoting a bit depth the
 		// file does not have.
-		lv_label_set_text(format_label, name);
+		format_set("%s", name);
 		return;
 	}
 
 	int bits = audio_get_stream_bits();
-	lv_label_set_text_fmt(format_label, "%d/%g %s", bits > 0 ? bits : 16, state->stream_sample_rate / 1000.0, name);
+	format_set("%d/%g %s", bits > 0 ? bits : 16, state->stream_sample_rate / 1000.0, name);
 }
 
 // The speed setting of what is playing: an episode has its own, apart from the
@@ -4208,7 +4339,15 @@ static void update_progress(void) {
 	// player dressed as a podcast over a song.
 	apply_audiobook_mode(!state.live && audiobook_is_playing(),
 						 !state.live && podcastcache_is_episode(state.current_file));
-	update_format_label(&state); // the rate/bits settle shortly after the start
+	// The rate and bit depth settle shortly after a track starts and then stop
+	// moving. A second is soon enough to catch that, and a refresh on a track
+	// change still writes the line at once: twice a second the decoder and the
+	// file were being asked for a label that had not changed.
+	static uint32_t format_tick;
+	if (lv_tick_elaps(format_tick) >= 1000) {
+		update_format_label(&state);
+		format_tick = lv_tick_get();
+	}
 
 	// The status LED follows playback promptly from here (the battery poll
 	// only comes round once a minute). Only writes when the colour changes.
@@ -4519,14 +4658,24 @@ static void progress_slider_event_cb(lv_event_t *e) {
 		lv_timer_resume(progress_slider_timer);
 	}
 
+	// The finger went somewhere else -- off the slider, or under another
+	// object that took the press. RELEASED never comes, and a poll left paused
+	// here stays paused: the bar and the clocks freeze until the player is
+	// opened again. Put the two timers back the way a release would.
+	if (code == LV_EVENT_PRESS_LOST) {
+		lv_timer_resume(progress_slider_timer);
+		smooth_timer_sync();
+	}
+
 	if (code == LV_EVENT_VALUE_CHANGED) {
 		// While dragging, the left clock previews where the knob would land.
 		int value = lv_slider_get_value(progress_slider);
 
 		double seconds = view_seconds(value);
 
-		formatDoubleSeconds(seconds - view_start, progress_label_text, sizeof(progress_label_text));
-		lv_label_set_text(elapsed_label, progress_label_text);
+		char text[32];
+		formatDoubleSeconds(seconds - view_start, text, sizeof(text));
+		text_set(elapsed_label, elapsed_text, sizeof(elapsed_text), text);
 
 		// And so does the waveform, when that is what is being dragged. The
 		// poll is paused for the duration of the press, so without this the
@@ -5084,6 +5233,16 @@ void player_sheet_attach_drag(lv_obj_t *obj, bool opening) {
 	lv_obj_add_event_cb(obj, sheet_drag_cb, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)opening);
 }
 
+// A finger on a transport button dims it a little. The buttons carry no fill of
+// their own, so without this nothing on the page acknowledges a press until it
+// acts. The whole object fades; it is a small object, and the layer LVGL makes
+// for it lives only while the finger is down.
+static void press_feedback(lv_obj_t *btn) {
+	if (btn) {
+		lv_obj_set_style_opa(btn, LV_OPA_70, LV_STATE_PRESSED);
+	}
+}
+
 // Builds the player sheet: artwork, controls and the poll that drives them.
 void player_init(gui_config_t *cfg) {
 	// The artwork decodes on the shared worker; make sure it exists before
@@ -5148,6 +5307,7 @@ void player_init(gui_config_t *cfg) {
 
 	// Track info: the text on the left, the star and the format on the right.
 	lv_obj_t *song_info = lv_obj_create(player_menu);
+	song_info_obj = song_info;
 	lv_obj_set_size(song_info, lv_pct(100), LV_SIZE_CONTENT);
 	lv_obj_set_style_bg_opa(song_info, 0, 0);
 	lv_obj_set_style_border_width(song_info, 0, 0);
@@ -5179,7 +5339,10 @@ void player_init(gui_config_t *cfg) {
 	lv_label_set_text(song_title_label, tr("player_no_track_loaded"));
 	lv_obj_set_width(song_title_label, lv_pct(100));
 	lv_obj_add_style(song_title_label, &theme_style_text, 0);
-	lv_obj_set_style_text_font(song_title_label, &font_ui_26, 0);
+	// Semibold, a size down: the same words read as a heading rather than as a
+	// line of plain text, and the size gap under them is what says which of the
+	// two lines is the track.
+	lv_obj_set_style_text_font(song_title_label, &font_ui_24_bold, 0);
 	scrolltext_apply(song_title_label);
 
 	// The artist line -- see refresh_now_playing().
@@ -5187,7 +5350,7 @@ void player_init(gui_config_t *cfg) {
 	lv_label_set_text(song_artist_label, "");
 	lv_obj_set_width(song_artist_label, lv_pct(100));
 	lv_obj_add_style(song_artist_label, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(song_artist_label, &font_ui_24, 0);
+	lv_obj_set_style_text_font(song_artist_label, &font_ui_20, 0);
 	scrolltext_apply(song_artist_label);
 
 	// Right side: the favourite star over the stream format.
@@ -5209,6 +5372,7 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_style_border_width(fav_btn, 0, 0);
 	lv_obj_set_style_shadow_width(fav_btn, 0, 0);
 	lv_obj_set_style_pad_all(fav_btn, 0, 0);
+	press_feedback(fav_btn);
 	lv_obj_add_event_cb(fav_btn, fav_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
 	fav_btn_icon = lv_image_create(fav_btn);
@@ -5218,7 +5382,16 @@ void player_init(gui_config_t *cfg) {
 	format_label = lv_label_create(song_side);
 	lv_label_set_text(format_label, "");
 	lv_obj_add_style(format_label, &theme_style_text_dim, 0);
-	lv_obj_set_style_text_font(format_label, &font_ui_18, 0);
+	lv_obj_set_style_text_font(format_label, &font_ui_16, 0);
+	// A quiet lozenge of its own, the same shape as the pills the sleeve wears
+	// in the waveform arrangement: "16/44.1 FLAC" is a badge, not a third line
+	// of the title. White at 10% reads over the blurred backdrop; over the
+	// light theme's white panel it simply steps aside.
+	lv_obj_set_style_bg_color(format_label, lv_color_white(), 0);
+	lv_obj_set_style_bg_opa(format_label, LV_OPA_10, 0);
+	lv_obj_set_style_radius(format_label, LV_RADIUS_CIRCLE, 0);
+	lv_obj_set_style_pad_hor(format_label, 9, 0);
+	lv_obj_set_style_pad_ver(format_label, 3, 0);
 
 	// The shape of the track, and the slider laid over it that still does the
 	// seeking. Two things in the same place rather than one: drawing a
@@ -5248,31 +5421,40 @@ void player_init(gui_config_t *cfg) {
 		}
 	}
 
-	// Playback progress, drawn as described at PROGRESS_TRACK_HEIGHT.
+	// Playback progress, drawn as described at PROGRESS_TRACK_HEIGHT: the
+	// theme's own groove, the accent for the part already played, and a small
+	// dot on it.
 	progress_slider = lv_slider_create(player_menu);
 	lv_obj_set_width(progress_slider, lv_pct(100));
 	lv_obj_set_height(progress_slider, PROGRESS_TRACK_HEIGHT);
 	lv_slider_set_range(progress_slider, 0, 1000);
 
-	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-	lv_obj_set_style_bg_color(progress_slider, lv_color_make(255, 255, 255), LV_PART_MAIN);
-	lv_obj_set_style_bg_opa(progress_slider, LV_OPA_30, LV_PART_MAIN);
+	// The unfilled part is the shared slider groove (the secondary text colour
+	// at low opacity), so it reads in both palettes instead of disappearing
+	// into the light theme's white panel.
+	lv_obj_add_style(progress_slider, &theme_style_slider_track, LV_PART_MAIN);
 
 	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
 	lv_obj_set_style_bg_color(progress_slider, theme()->accent, LV_PART_INDICATOR);
+	lv_obj_set_style_bg_opa(progress_slider, LV_OPA_COVER, LV_PART_INDICATOR);
 
 	lv_obj_set_style_radius(progress_slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
 	lv_obj_set_style_bg_color(progress_slider, theme()->accent, LV_PART_KNOB);
-	lv_obj_set_style_border_color(progress_slider, lv_color_white(), LV_PART_KNOB);
-	lv_obj_set_style_border_opa(progress_slider, LV_OPA_COVER, LV_PART_KNOB);
-	lv_obj_set_style_border_width(progress_slider, PROGRESS_KNOB_RING, LV_PART_KNOB);
 	lv_obj_set_style_pad_all(progress_slider, PROGRESS_KNOB_GROW, LV_PART_KNOB);
-	lv_obj_set_style_shadow_width(progress_slider, 8, LV_PART_KNOB);
-	lv_obj_set_style_shadow_opa(progress_slider, LV_OPA_40, LV_PART_KNOB);
-	lv_obj_set_style_shadow_color(progress_slider, lv_color_black(), LV_PART_KNOB);
-	lv_obj_set_style_shadow_offset_y(progress_slider, 1, LV_PART_KNOB);
+	// A hairline outline, not the chunky white ring that used to be here, and
+	// no shadow -- not even the small one the default theme puts under a knob:
+	// this one is a dot on a groove.
+	lv_obj_set_style_shadow_width(progress_slider, 0, LV_PART_KNOB);
+	theme_apply_slider_knob(progress_slider);
 
-	lv_obj_add_event_cb(progress_slider, progress_slider_event_cb, LV_EVENT_ALL, NULL);
+	// The four events the handler acts on, and not LV_EVENT_ALL: a slider is
+	// sent a crowd of others while it is drawn (refresh ext draw size, cover
+	// check, the drawing events themselves), and a callback entered for each of
+	// them is a branch that always falls through.
+	lv_obj_add_event_cb(progress_slider, progress_slider_event_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(progress_slider, progress_slider_event_cb, LV_EVENT_RELEASED, NULL);
+	lv_obj_add_event_cb(progress_slider, progress_slider_event_cb, LV_EVENT_PRESS_LOST, NULL);
+	lv_obj_add_event_cb(progress_slider, progress_slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
 	// Polls playback to keep the slider, the clock and the play/pause icon in
 	// sync. It runs from here on, slowing down rather than stopping when
@@ -5313,13 +5495,13 @@ void player_init(gui_config_t *cfg) {
 	elapsed_label = lv_label_create(below_slider_group);
 	lv_label_set_text(elapsed_label, "0:00");
 	lv_obj_add_style(elapsed_label, &theme_style_text, 0);
-	lv_obj_set_style_text_font(elapsed_label, &font_ui_22, 0);
+	lv_obj_set_style_text_font(elapsed_label, &font_ui_20, 0);
 	lv_obj_set_align(elapsed_label, LV_ALIGN_LEFT_MID);
 
 	remaining_label = lv_label_create(below_slider_group);
 	lv_label_set_text(remaining_label, "0:00");
 	lv_obj_add_style(remaining_label, &theme_style_text, 0);
-	lv_obj_set_style_text_font(remaining_label, &font_ui_22, 0);
+	lv_obj_set_style_text_font(remaining_label, &font_ui_20, 0);
 	lv_obj_set_align(remaining_label, LV_ALIGN_RIGHT_MID);
 
 	// Between them, in the middle the two clocks left empty. Dimmer than they
@@ -5330,7 +5512,7 @@ void player_init(gui_config_t *cfg) {
 	// A step below the clocks either side of it, as well as dimmer: it is a
 	// bearing and they are the reading, and at the same size the three read as
 	// one row of equals.
-	lv_obj_set_style_text_font(queue_position_label, &font_ui_18, 0);
+	lv_obj_set_style_text_font(queue_position_label, &font_ui_16, 0);
 	lv_obj_set_align(queue_position_label, LV_ALIGN_CENTER);
 
 	// Transport: prev, play/pause, next -- with the repeat toggle parked on
@@ -5355,6 +5537,7 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_size(repeat_btn, 56, 56);
 	lv_obj_set_style_bg_opa(repeat_btn, 0, 0);
 	lv_obj_set_style_shadow_width(repeat_btn, 0, 0);
+	press_feedback(repeat_btn);
 	lv_obj_add_event_cb(repeat_btn, repeat_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_align(repeat_btn, LV_ALIGN_LEFT_MID, 0, 0);
 	// The glyph stays 56 px; the area that takes the tap does not, out to the
@@ -5374,6 +5557,7 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_size(speed_btn, 56, 56);
 	lv_obj_set_style_bg_opa(speed_btn, 0, 0);
 	lv_obj_set_style_shadow_width(speed_btn, 0, 0);
+	press_feedback(speed_btn);
 	lv_obj_add_event_cb(speed_btn, speed_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_align(speed_btn, LV_ALIGN_LEFT_MID, 0, 0);
 	lv_obj_set_ext_click_area(speed_btn, CORNER_BTN_EXT_CLICK);
@@ -5393,6 +5577,7 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_size(more_btn, 56, 56);
 	lv_obj_set_style_bg_opa(more_btn, 0, 0);
 	lv_obj_set_style_shadow_width(more_btn, 0, 0);
+	press_feedback(more_btn);
 	lv_obj_add_event_cb(more_btn, more_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_align(more_btn, LV_ALIGN_RIGHT_MID, 0, 0);
 	lv_obj_set_ext_click_area(more_btn, CORNER_BTN_EXT_CLICK);
@@ -5413,10 +5598,14 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_style_bg_opa(prev_btn, 0, 0);
 	lv_obj_set_style_shadow_width(prev_btn, 0, 0);
 	prev_icon = lv_image_create(prev_btn);
-	lv_image_set_src(prev_icon, &icon_skip_back);
+	// The 42 px pair, not the 34 px one: beside the 40 px play glyph the small
+	// ones left the row looking pinched into the middle, and these are the same
+	// two the control centre already draws.
+	lv_image_set_src(prev_icon, &icon_skip_back_large);
 	lv_obj_add_style(prev_icon, &theme_style_icon, 0);
 	lv_obj_center(prev_icon);
 
+	press_feedback(prev_btn);
 	lv_obj_add_event_cb(prev_btn, prev_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_set_style_opa(prev_btn, LV_OPA_40, LV_STATE_DISABLED); // see apply_connecting()
 
@@ -5427,6 +5616,7 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_style_bg_color(play_btn, lv_color_white(), 0); // repainted by set_over_cover
 	lv_obj_set_style_bg_opa(play_btn, LV_OPA_COVER, 0);
 	lv_obj_set_style_shadow_width(play_btn, 0, 0);
+	press_feedback(play_btn);
 	lv_obj_add_event_cb(play_btn, play_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_set_style_opa(play_btn, LV_OPA_40, LV_STATE_DISABLED);
 
@@ -5440,10 +5630,11 @@ void player_init(gui_config_t *cfg) {
 	lv_obj_set_style_bg_opa(next_btn, 0, 0);
 	lv_obj_set_style_shadow_width(next_btn, 0, 0);
 	next_icon = lv_image_create(next_btn);
-	lv_image_set_src(next_icon, &icon_skip_forward);
+	lv_image_set_src(next_icon, &icon_skip_forward_large);
 	lv_obj_add_style(next_icon, &theme_style_icon, 0);
 	lv_obj_center(next_icon);
 
+	press_feedback(next_btn);
 	lv_obj_add_event_cb(next_btn, next_btn_event_cb, LV_EVENT_CLICKED, NULL);
 	lv_obj_set_style_opa(next_btn, LV_OPA_40, LV_STATE_DISABLED);
 
