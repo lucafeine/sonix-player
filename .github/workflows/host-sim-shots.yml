@@ -1,0 +1,138 @@
+name: Host simulator screenshots
+
+# Builds the SDL host simulator and photographs its own screen with the
+# player's built-in screenshot path (main.c: /tmp/sonix/shot). Nothing here
+# runs on the device; this is only a way to see what the interface looks like
+# without a compiler on hand.
+on:
+  push:
+    branches: [ci/host-sim]
+  workflow_dispatch:
+
+jobs:
+  shots:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build and capture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libsdl2-dev libfreetype-dev libopusfile-dev libwavpack-dev libasound2-dev \
+            xvfb imagemagick ffmpeg sqlite3
+
+      - name: Build the host simulator
+        working-directory: sonix-player
+        run: make host -j"$(nproc)"
+
+      - name: Prepare resources and a test card
+        working-directory: sonix-player
+        run: |
+          set -euo pipefail
+          mkdir -p usr/resource
+          cp -r ../sonix-packer/assets/R3PII/usr/resource/sonix usr/resource/
+
+          mkdir -p /tmp/sd/Music /tmp/sonix
+
+          # A sleeve with some colour in it, so the blurred backdrop and the
+          # cover accent have something to work from.
+          convert -size 640x640 gradient:'#1b2a41-#c9773a' \
+            -gravity center -pointsize 56 -fill white \
+            -annotate 0 'Simulator Sessions' /tmp/cover.png
+
+          # Three minutes, so the progress bar sits well away from both ends.
+          ffmpeg -y -loglevel error -f lavfi -i "sine=frequency=220:duration=180" \
+            -i /tmp/cover.png -map 0:a -map 1:v -c:a libmp3lame -b:a 192k \
+            -c:v png -id3v2_version 3 \
+            -metadata title="Midnight Drive" -metadata artist="The Testers" \
+            -metadata album="Simulator Sessions" \
+            -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" \
+            -disposition:v attached_pic /tmp/sd/Music/test.mp3
+
+          mk_base() {
+            cat > "$1" <<EOF
+          [ui]
+          language=English
+          dark_theme=$2
+
+          [clock]
+          configured=1
+
+          [player]
+          remember_track=1
+
+          [music]
+          nowplaying_at_boot=true
+
+          [screen]
+          player_layout_alt=$3
+          EOF
+          }
+
+          mk_base /tmp/sonix/dark.ini true 0
+          mk_base /tmp/sonix/light.ini false 0
+          mk_base /tmp/sonix/studio.ini true 2
+
+      - name: First run, to create the card database
+        working-directory: sonix-player
+        run: |
+          set -euo pipefail
+          mkdir -p screenshots
+          export SONIX_CONFIG=/tmp/sonix/dark.ini SONIX_SD_ROOT=/tmp/sd
+          export SONIX_NO_MOUNT=1 SONIX_NO_SYSSERVER=1
+          timeout -k 5s 25s xvfb-run -a -s "-screen 0 480x800x24" ./sonix_player_host \
+            > /tmp/sonix/first-run.log 2>&1 || true
+          tail -30 /tmp/sonix/first-run.log
+          cp /tmp/sonix/first-run.log screenshots/first-run.log
+          ls -la /tmp/sd/.local
+
+      - name: Seed the remembered track
+        run: |
+          set -euo pipefail
+          sqlite3 /tmp/sd/.local/library.db \
+            "INSERT OR REPLACE INTO PLAYBACK_STATE(id,path,position,updated_at) \
+             VALUES(0,'/tmp/sd/Music/test.mp3',42.0,strftime('%s','now'));"
+          sqlite3 /tmp/sd/.local/library.db "SELECT * FROM PLAYBACK_STATE;"
+
+      - name: Photograph the player
+        working-directory: sonix-player
+        run: |
+          set -euo pipefail
+          mkdir -p screenshots
+
+          shoot() {
+            local config="$1" name="$2"
+            export SONIX_CONFIG="$config" SONIX_SD_ROOT=/tmp/sd
+            export SONIX_NO_MOUNT=1 SONIX_NO_SYSSERVER=1
+            ( sleep 14; touch /tmp/sonix/shot ) &
+            timeout -k 5s 24s xvfb-run -a -s "-screen 0 480x800x24" ./sonix_player_host \
+              > "/tmp/sonix/run-${name}.log" 2>&1 || true
+            wait || true
+            tail -40 "/tmp/sonix/run-${name}.log"
+            cp "/tmp/sonix/run-${name}.log" "screenshots/${name}.log"
+            sleep 1
+            local newest
+            newest="$(ls -t /tmp/sd/Screenshots/*.png 2>/dev/null | head -1 || true)"
+            if [ -n "$newest" ]; then
+              cp "$newest" "screenshots/${name}.png"
+            else
+              echo "no screenshot for ${name}"
+            fi
+          }
+
+          shoot /tmp/sonix/dark.ini standard-dark
+          shoot /tmp/sonix/light.ini standard-light
+          shoot /tmp/sonix/studio.ini studio-dark
+
+          ls -la screenshots
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-simulator-shots
+          path: sonix-player/screenshots/*
+          if-no-files-found: warn
