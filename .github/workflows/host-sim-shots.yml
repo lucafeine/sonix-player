@@ -37,6 +37,18 @@ jobs:
 
           mkdir -p /tmp/sd/Music /tmp/sonix
 
+          # The screenshot writer uses storage_sd_root(), which on the host is
+          # the device mount path and not SONIX_SD_ROOT.
+          sudo mkdir -p /mnt/sd_0/Screenshots
+          sudo chown -R "$USER":"$USER" /mnt/sd_0
+
+          # A silent null PCM, so the restored track actually plays: without a
+          # card the decoder opens "default", fails, and the track ends at once
+          # with the progress bar parked at zero.
+          cat > "$HOME/.asoundrc" <<'EOF'
+          pcm.!default { type null }
+          EOF
+
           # A sleeve with some colour in it, so the blurred backdrop and the
           # cover accent have something to work from.
           convert -size 640x640 gradient:'#1b2a41-#c9773a' \
@@ -111,15 +123,15 @@ jobs:
             local config="$1" name="$2"
             export SONIX_CONFIG="$config" SONIX_SD_ROOT=/tmp/sd
             export SONIX_NO_MOUNT=1 SONIX_NO_SYSSERVER=1
-            ( sleep 14; touch /tmp/sonix/shot ) &
-            timeout -k 5s 24s xvfb-run -a -s "-screen 0 480x800x24" ./sonix_player_host \
+            ( sleep 16; touch /tmp/sonix/shot ) &
+            timeout -k 5s 28s xvfb-run -a -s "-screen 0 480x800x24" ./sonix_player_host \
               > "/tmp/sonix/run-${name}.log" 2>&1 || true
             wait || true
             tail -40 "/tmp/sonix/run-${name}.log"
             cp "/tmp/sonix/run-${name}.log" "screenshots/${name}.log"
             sleep 1
             local newest
-            newest="$(ls -t /tmp/sd/Screenshots/*.png 2>/dev/null | head -1 || true)"
+            newest="$(ls -t /mnt/sd_0/Screenshots/*.png 2>/dev/null | head -1 || true)"
             if [ -n "$newest" ]; then
               cp "$newest" "screenshots/${name}.png"
             else
