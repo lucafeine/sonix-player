@@ -104,10 +104,22 @@ jobs:
       - name: Seed the remembered track
         run: |
           set -euo pipefail
-          # The simulator reads the card mount as read-only (/mnt/sd_0 is not a
-          # real mount here) and keeps the databases in /tmp for the session.
-          DB=/tmp/.local/library.db
-          test -f "$DB"
+          # Which of the two roots the database landed in depends on whether
+          # the simulator reads /mnt/sd_0 as writable, so find the one that
+          # actually carries the schema rather than guessing.
+          DB=""
+          for f in /tmp/sd/.local/library.db /tmp/.local/library.db /mnt/sd_0/.local/library.db; do
+            if [ -f "$f" ] && sqlite3 "$f" ".schema PLAYBACK_STATE" 2>/dev/null | grep -q PLAYBACK_STATE; then
+              DB="$f"
+              break
+            fi
+          done
+          if [ -z "$DB" ]; then
+            echo "no library database with a PLAYBACK_STATE table:"
+            find /tmp /mnt/sd_0 -maxdepth 5 -name '*.db' 2>/dev/null
+            exit 1
+          fi
+          echo "seeding $DB"
           sqlite3 "$DB" \
             "INSERT OR REPLACE INTO PLAYBACK_STATE(id,path,position,updated_at) \
              VALUES(0,'/tmp/sd/Music/test.mp3',42.0,strftime('%s','now'));"
