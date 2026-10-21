@@ -1050,6 +1050,14 @@ static void set_over_cover(bool on) {
 		}
 	}
 
+	// The format chip: white over artwork, the theme's own pressed surface on
+	// the plain panel. A white 10% lozenge disappears into the light theme's
+	// white panel; a grey one keeps the badge readable there without shouting.
+	if (format_label) {
+		lv_obj_set_style_bg_color(format_label, on ? lv_color_white() : theme()->surface_pressed, 0);
+		lv_obj_set_style_bg_opa(format_label, on ? LV_OPA_10 : LV_OPA_20, 0);
+	}
+
 	// The disc: white over artwork and in the dark theme, where white reads
 	// as the brightest thing on screen. The one case it has to go dark is the
 	// light theme with no cover -- a white disc on a near-white panel is

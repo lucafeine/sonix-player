@@ -64,6 +64,13 @@ jobs:
             -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" \
             -disposition:v attached_pic /tmp/sd/Music/test.mp3
 
+          # The same track without a sleeve, to see the plain panel -- the one
+          # place the light theme differs.
+          ffmpeg -y -loglevel error -f lavfi -i "sine=frequency=330:duration=180" \
+            -c:a libmp3lame -b:a 320k -id3v2_version 3 \
+            -metadata title="Paper Skies" -metadata artist="No Cover" \
+            -metadata album="B-Sides" /tmp/sd/Music/test-nocover.mp3
+
           mk_base() {
             cat > "$1" <<EOF
           [ui]
@@ -87,6 +94,7 @@ jobs:
           mk_base /tmp/sonix/dark.ini true 0
           mk_base /tmp/sonix/light.ini false 0
           mk_base /tmp/sonix/studio.ini true 2
+          mk_base /tmp/sonix/light-nocover.ini false 0
 
       - name: First run, to create the card database
         working-directory: sonix-player
@@ -131,8 +139,24 @@ jobs:
           set -euo pipefail
           mkdir -p screenshots
 
+          find_db() {
+            local f
+            for f in /tmp/sd/.local/library.db /tmp/.local/library.db /mnt/sd_0/.local/library.db; do
+              if [ -f "$f" ] && sqlite3 "$f" ".schema PLAYBACK_STATE" 2>/dev/null | grep -q PLAYBACK_STATE; then
+                echo "$f"
+                return 0
+              fi
+            done
+            return 1
+          }
+
           shoot() {
-            local config="$1" name="$2"
+            local config="$1" name="$2" track="$3"
+            local db
+            db="$(find_db)" || { echo "no database for ${name}"; return 1; }
+            sqlite3 "$db" \
+              "INSERT OR REPLACE INTO PLAYBACK_STATE(id,path,position,updated_at) \
+               VALUES(0,'${track}',42.0,strftime('%s','now'));"
             export SONIX_CONFIG="$config" SONIX_SD_ROOT=/tmp/sd
             export SONIX_NO_MOUNT=1 SONIX_NO_SYSSERVER=1
             ( sleep 16; touch /tmp/sonix/shot ) &
@@ -151,9 +175,10 @@ jobs:
             fi
           }
 
-          shoot /tmp/sonix/dark.ini standard-dark
-          shoot /tmp/sonix/light.ini standard-light
-          shoot /tmp/sonix/studio.ini studio-dark
+          shoot /tmp/sonix/dark.ini standard-dark /tmp/sd/Music/test.mp3
+          shoot /tmp/sonix/light.ini standard-light /tmp/sd/Music/test.mp3
+          shoot /tmp/sonix/studio.ini studio-dark /tmp/sd/Music/test.mp3
+          shoot /tmp/sonix/light-nocover.ini standard-light-nocover /tmp/sd/Music/test-nocover.mp3
 
           ls -la screenshots
 
